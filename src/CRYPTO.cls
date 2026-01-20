@@ -168,7 +168,39 @@ Private Function AddUnsigned(lX, lY)
     AddUnsigned = lResult
 End Function
 
-Private Function ConvertToWordArray(sMessage As String) As Long()
+' Converts a string to an array of 32-bit words (little-endian, padding and bit length included)
+' as required for MD5 hashing.
+'
+' Example:
+'   Input string: "hello world"
+'
+'   After processing:
+'   - The first 11 bytes come from ASCII
+'   - Append 0x80 (10000000)
+'   - Zero padding until length is congruent to 448 mod 512 (56 bytes)
+'   - The message length in bits (88 = 0x58) is appended as a 64-bit little-endian integer
+'
+'   Example output (array of 16 Longs, 32 bits each):
+'     Index | Hex bytes (VBA) | Packed hex string (little-endian) | ASCII (packed chars)
+'     [ 0]  | &H6C6C6568      | 6c6c6568                          | "hell"
+'     [ 1]  | &H6F77206F      | 6f77206f                          | "o wo"
+'     [ 2]  | &H80646C72      | 80646c72                          | "rld" & vbLf & Chr(&H80)
+'     [ 3]  | &H00000000      | 00000000
+'     [ 4]  | &H00000000      | 00000000
+'     [ 5]  | &H00000000      | 00000000
+'     [ 6]  | &H00000000      | 00000000
+'     [ 7]  | &H00000000      | 00000000
+'     [ 8]  | &H00000000      | 00000000
+'     [ 9]  | &H00000000      | 00000000
+'     [10]  | &H00000000      | 00000000
+'     [11]  | &H00000000      | 00000000
+'     [12]  | &H00000000      | 00000000
+'     [13]  | &H00000000      | 00000000
+'     [14]  | &H00000058      | 00000058 ' bit length (low dword): 88 bits
+'     [15]  | &H00000000      | 00000000 ' bit length (high dword)
+'
+'   This array can now be used with MD5 core processing.
+Private Function StringToWordArrayMD5(sMessage As String) As Long()
     Dim lMessageLength As Long
     Dim lNumberOfWords As Long
     Dim lWordArray() As Long
@@ -201,10 +233,28 @@ Private Function ConvertToWordArray(sMessage As String) As Long()
     lWordArray(lNumberOfWords - 2) = LShift(lMessageLength, 3)
     lWordArray(lNumberOfWords - 1) = RShift(lMessageLength, 29)
 
-    ConvertToWordArray = lWordArray
+    StringToWordArrayMD5 = lWordArray
 End Function
 
-Private Function ConvertToWordArray2(sMessage As String) As Long()
+' Converts a string to an array of 32-bit words (big-endian, padding and bit length included)
+' as required for SHA-1, SHA-256, etc.
+'
+' Example:
+'   Input string: "hello world"
+'
+'   After processing:
+'   - The first bytes are from ASCII
+'   - Append 0x80 (10000000)
+'   - Zero padding until length is congruent to 448 mod 512 (56 bytes)
+'   - The message length in bits (88 = 0x58) is appended as a 64-bit big-endian integer
+'
+'   Output (array of 16 Longs, 32 bits each for a 512-bit block):
+'     [ 0] ... [13] = input bits, padding, and zeroes as needed
+'     [14] = high dword of message bit length (for short ASCII, this is 0)
+'     [15] = low dword of message bit length (e.g. 0x00000058 for "hello world")
+'
+'   This array is used for SHA core processing.
+Private Function StringToWordArraySHA(sMessage As String) As Long()
     Dim lMessageLength  As Long
     Dim lNumberOfWords  As Long
     Dim lWordArray()    As Long
@@ -239,7 +289,7 @@ Private Function ConvertToWordArray2(sMessage As String) As Long()
     lWordArray(lNumberOfWords - 1) = LShift(lMessageLength, 3)
     lWordArray(lNumberOfWords - 2) = RShift(lMessageLength, 29)
 
-    ConvertToWordArray2 = lWordArray
+    StringToWordArraySHA = lWordArray
 End Function
 
 Private Function todo(s)
@@ -340,8 +390,65 @@ Private Function littleSigmaPrime(ByVal x As Long) As Long
     littleSigmaPrime = rotr(x, 17) Xor rotr(x, 19) Xor rs(x, 10)
 End Function
 
-Private Function calculateSHA1(words() AS Long) AS Long()
-    todo "calculateSHA1"
+Private Function calculateSHA1(words() As Long) As Long()
+    Dim H(4) As Long
+    H(0) = &H67452301
+    H(1) = &HEFCDAB89
+    H(2) = &H98BADCFE
+    H(3) = &H10325476
+    H(4) = &HC3D2E1F0
+
+    Dim W(79) As Long
+    Dim i As Long, t As Long
+    Dim a As Long, b As Long, c As Long, d As Long, e As Long, temp As Long
+    Dim k As Long, f As Long
+
+    For t = 0 To UBound(words) Step 16
+        ' Prepare the message schedule
+        For i = 0 To 15
+            W(i) = words(t + i)
+        Next i
+        For i = 16 To 79
+            W(i) = RotateLeft(W(i - 3) Xor W(i - 8) Xor W(i - 14) Xor W(i - 16), 1)
+        Next i
+
+        a = H(0)
+        b = H(1)
+        c = H(2)
+        d = H(3)
+        e = H(4)
+
+        For i = 0 To 79
+            If i >= 0 And i <= 19 Then
+                f = (b And c) Or ((Not b) And d)
+                k = &H5A827999
+            ElseIf i >= 20 And i <= 39 Then
+                f = b Xor c Xor d
+                k = &H6ED9EBA1
+            ElseIf i >= 40 And i <= 59 Then
+                f = (b And c) Or (b And d) Or (c And d)
+                k = &H8F1BBCDC
+            Else
+                f = b Xor c Xor d
+                k = &HCA62C1D6
+            End If
+
+            temp = AddUnsigned(AddUnsigned(AddUnsigned(AddUnsigned(RotateLeft(a, 5), f), e), k), W(i))
+            e = d
+            d = c
+            c = RotateLeft(b, 30)
+            b = a
+            a = temp
+        Next i
+
+        H(0) = AddUnsigned(H(0), a)
+        H(1) = AddUnsigned(H(1), b)
+        H(2) = AddUnsigned(H(2), c)
+        H(3) = AddUnsigned(H(3), d)
+        H(4) = AddUnsigned(H(4), e)
+    Next t
+
+    calculateSHA1 = H
 End Function
 
 Private Function calculateSHA256(words() AS Long) AS Long()
@@ -410,40 +517,52 @@ Private Function calculateSHA256(words() AS Long) AS Long()
     Next
     calculateSHA256 = result
 End Function
-Private Function calculateSHA384(words() AS Long) AS Long()
+
+Private Function calculateSHA384(words() As Long) As Long()
     todo "calculateSHA384"
 End Function
 
-Private Function calculateSHA512(words() AS Long) AS Long()
+Private Function calculateSHA512(words() As Long) As Long()
     todo "calculateSHA512"
 End Function
 
-Private Function rLongToHex(lValue As Long) As String
+' Converts a 32-bit Long value to an 8-character hex string in little-endian (reverse order, for MD5).
+' Example:
+'   longToHexLE(&H12345678) => "78563412"
+Private Function longToHexLE(lValue As Long) As String
     Dim lByte As Long
     Dim lCount As Long
-
     For lCount = 0 To 3
         lByte = RShift(lValue, lCount * BITS_TO_A_BYTE) And m_lOnBits(BITS_TO_A_BYTE - 1)
-        rLongToHex = rLongToHex & Right("0" & Hex(lByte), 2)
+        longToHexLE = longToHexLE & Right("0" & Hex(lByte), 2)
     Next
 End Function
 
-Private Function LongToHex(lValue As Long) As String
-    LongToHex = Right("00000000" & Hex(lValue), 8)
-End Function
-
-Private Function rLongsToHex(arr() As Long) As String
+' Converts an array of Longs to a hex string using longToHexLE (little-endian byte order), mainly for MD5 output.
+' Example:
+'   longsToHexLE(Array(&H12345678, &H9ABCDEF0)) => "78563412f0debc9a"
+Private Function longsToHexLE(arr() As Long) As String
     Dim i As Long, hexStr As String
     For i = 0 To UBound(arr)
-        hexStr = hexStr & rLongToHex(arr(i))
+        hexStr = hexStr & longToHexLE(arr(i))
     Next i
-    rLongsToHex = LCase(hexStr)
+    longsToHexLE = LCase(hexStr)
 End Function
 
+' Converts a 32-bit Long value to an 8-character hex string in big-endian (standard order, for SHA algorithms).
+' Example:
+'   longToHex(&H12345678) => "12345678"
+Private Function longToHex(lValue As Long) As String
+    longToHex = Right("00000000" & Hex(lValue), 8)
+End Function
+
+' Converts an array of Longs to a hex string using longToHex (big-endian byte order), mainly for SHA1/SHA256 output.
+' Example:
+'   longsToHex(Array(&H12345678, &H9ABCDEF0))  => "123456789abcdef0"
 Private Function longsToHex(arr() As Long) As String
     Dim i As Long, hexStr As String
     For i = 0 To UBound(arr)
-        hexStr = hexStr & LongToHex(arr(i))
+        hexStr = hexStr & longToHex(arr(i))
     Next i
     longsToHex = LCase(hexStr)
 End Function
@@ -451,15 +570,15 @@ End Function
 Public Sub update(s As String)
     Select Case hashMode
         Case "md5"
-            hash = rLongsToHex(calculateMD5(ConvertToWordArray(s)))
+            hash = longsToHexLE(calculateMD5(StringToWordArrayMD5(s)))
         Case "sha1"
-            hash = longsToHex(calculateSHA1(ConvertToWordArray2(s)))
+            hash = longsToHex(calculateSHA1(StringToWordArraySHA(s)))
         Case "sha256"
-            hash = longsToHex(calculateSHA256(ConvertToWordArray2(s)))
+            hash = longsToHex(calculateSHA256(StringToWordArraySHA(s)))
         Case "sha384"
-            hash = longsToHex(calculateSHA384(ConvertToWordArray2(s)))
+            hash = longsToHex(calculateSHA384(StringToWordArraySHA(s)))
         Case "sha512"
-            hash = longsToHex(calculateSHA512(ConvertToWordArray2(s)))
+            hash = longsToHex(calculateSHA512(StringToWordArraySHA(s)))
     End Select
 End Sub
 
