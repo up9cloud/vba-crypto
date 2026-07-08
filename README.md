@@ -7,11 +7,12 @@ crypto library for VBA.
 - Download `./src/CRYPTO.cls`
 - Open your excel file, go to the macro editor `Microsoft Visual Basic for Applications` (ALT + F11)
 - Go to: File > Import File, to choose the `CRYPTO.cls` file from your download folder.
+- 
 
 ```vb
 Function hash(s)
   Dim o As New CRYPTO
-  o.createHash("sha256") ' md5, sha256
+  o.createHash("sha256") ' md5, sha256, sha384, sha512
   o.update(s)
   hash = o.digest("hex") ' hex, base64
   Set o = Nothing
@@ -62,3 +63,4 @@ Debug.Print hash("hello world")
 - sha***: https://github.com/mozilla/pdf.js/blob/master/src/core/calculate_sha_other.js
 - md5: https://stackoverflow.com/questions/125785/password-hash-function-for-excel-vba/125844#125844
 - ChatGPT: https://chatgpt.com/
+- Claude: https://claude.ai

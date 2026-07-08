@@ -25,6 +25,13 @@ Private m_l2Power(30)
 Private hashMode As String
 Private hash As String ' save as hex string
 
+' A 64-bit value, split into two 32-bit halves (VBA's Long is only 32-bit).
+' Used by the SHA-384/512 implementation, which operates on 64-bit words.
+Private Type T64
+    hi As Long
+    lo As Long
+End Type
+
 Private Sub Class_Initialize()
     m_lOnBits(0) = 1           ' 00000000000000000000000000000001
     m_lOnBits(1) = 3           ' 00000000000000000000000000000011
@@ -292,6 +299,51 @@ Private Function StringToWordArraySHA(sMessage As String) As Long()
     StringToWordArraySHA = lWordArray
 End Function
 
+' Converts a string to an array of 32-bit words (big-endian) padded to 1024-bit
+' blocks with a 128-bit message-length field, as required for SHA-384/SHA-512.
+'
+' The layout matches StringToWordArraySHA but uses 1024-bit blocks (32 Longs
+' each) and reserves the final 16 bytes for the length. Each 64-bit SHA word is
+' therefore the pair (lWordArray(2j), lWordArray(2j + 1)). For string inputs the
+' bit length always fits in the low 64 bits, so the upper Longs stay zero.
+Private Function StringToWordArraySHA512(sMessage As String) As Long()
+    Dim lMessageLength  As Long
+    Dim lNumberOfWords  As Long
+    Dim lWordArray()    As Long
+    Dim lBytePosition   As Long
+    Dim lByteCount      As Long
+    Dim lWordCount      As Long
+    Dim lByte           As Long
+
+    Const MODULUS_BITS As Long = 1024
+    Const CONGRUENT_BITS As Long = 896
+
+    lMessageLength = Len(sMessage)
+
+    lNumberOfWords = (((lMessageLength + ((MODULUS_BITS - CONGRUENT_BITS) \ BITS_TO_A_BYTE)) \ (MODULUS_BITS \ BITS_TO_A_BYTE)) + 1) * (MODULUS_BITS \ BITS_TO_A_WORD)
+    ReDim lWordArray(lNumberOfWords - 1)
+
+    lBytePosition = 0
+    lByteCount = 0
+    Do Until lByteCount >= lMessageLength
+        lWordCount = lByteCount \ BYTES_TO_A_WORD
+        lBytePosition = (3 - (lByteCount Mod BYTES_TO_A_WORD)) * BITS_TO_A_BYTE
+        lByte = AscB(Mid(sMessage, lByteCount + 1, 1))
+        lWordArray(lWordCount) = lWordArray(lWordCount) Or LShift(lByte, lBytePosition)
+        lByteCount = lByteCount + 1
+    Loop
+
+    lWordCount = lByteCount \ BYTES_TO_A_WORD
+    lBytePosition = (3 - (lByteCount Mod BYTES_TO_A_WORD)) * BITS_TO_A_BYTE
+
+    lWordArray(lWordCount) = lWordArray(lWordCount) Or LShift(&H80, lBytePosition)
+
+    lWordArray(lNumberOfWords - 1) = LShift(lMessageLength, 3)
+    lWordArray(lNumberOfWords - 2) = RShift(lMessageLength, 29)
+
+    StringToWordArraySHA512 = lWordArray
+End Function
+
 Private Function todo(s)
   Debug.Print "TODO: " & s
 End Function
@@ -518,12 +570,270 @@ Private Function calculateSHA256(words() AS Long) AS Long()
     calculateSHA256 = result
 End Function
 
+' --- 64-bit helpers -----------------------------------------------------------
+' VBA's Long is 32-bit, but SHA-384/512 operate on 64-bit words. Each 64-bit
+' value is carried in a T64 (hi/lo Long halves). RShift/LShift below are 32-bit
+' zero-fill (logical) shifts provided earlier in this module. To stay within
+' classic VBA, function results are always assigned to a variable before being
+' passed on (UDT arguments are ByRef, so passing a call result directly is not
+' portable).
+
+' Builds a 64-bit value from its high and low 32-bit halves.
+Private Function mk64(ByVal hi As Long, ByVal lo As Long) As T64
+    mk64.hi = hi
+    mk64.lo = lo
+End Function
+
+' Interprets a 32-bit Long as an unsigned value in the range [0, 2^32).
+Private Function unsignedVal(ByVal x As Long) As Double
+    If x < 0 Then
+        unsignedVal = CDbl(x) + 4294967296#
+    Else
+        unsignedVal = CDbl(x)
+    End If
+End Function
+
+' Converts an unsigned value in [0, 2^32) back to a signed 32-bit Long.
+Private Function doubleToLong(ByVal d As Double) As Long
+    If d >= 2147483648# Then
+        doubleToLong = CLng(d - 4294967296#)
+    Else
+        doubleToLong = CLng(d)
+    End If
+End Function
+
+' 64-bit modular addition (mod 2^64), carrying from the low half to the high half.
+Private Function Add64(a As T64, b As T64) As T64
+    Dim loSum As Double
+    Dim carry As Long
+    loSum = unsignedVal(a.lo) + unsignedVal(b.lo)
+    If loSum >= 4294967296# Then
+        carry = 1
+        loSum = loSum - 4294967296#
+    Else
+        carry = 0
+    End If
+    Add64.lo = doubleToLong(loSum)
+    Add64.hi = AddUnsigned(AddUnsigned(a.hi, b.hi), carry)
+End Function
+
+Private Function Xor64(a As T64, b As T64) As T64
+    Xor64.hi = a.hi Xor b.hi
+    Xor64.lo = a.lo Xor b.lo
+End Function
+
+Private Function And64(a As T64, b As T64) As T64
+    And64.hi = a.hi And b.hi
+    And64.lo = a.lo And b.lo
+End Function
+
+Private Function Not64(a As T64) As T64
+    Not64.hi = Not a.hi
+    Not64.lo = Not a.lo
+End Function
+
+' Rotates a 64-bit value right by n bits (0 <= n < 64).
+Private Function Rotr64(a As T64, ByVal n As Long) As T64
+    Dim hi As Long, lo As Long, m As Long
+    hi = a.hi
+    lo = a.lo
+    n = n Mod 64
+    If n = 0 Then
+        Rotr64.hi = hi
+        Rotr64.lo = lo
+    ElseIf n < 32 Then
+        Rotr64.hi = RShift(hi, n) Or LShift(lo, 32 - n)
+        Rotr64.lo = RShift(lo, n) Or LShift(hi, 32 - n)
+    ElseIf n = 32 Then
+        Rotr64.hi = lo
+        Rotr64.lo = hi
+    Else
+        m = n - 32
+        Rotr64.hi = RShift(lo, m) Or LShift(hi, 32 - m)
+        Rotr64.lo = RShift(hi, m) Or LShift(lo, 32 - m)
+    End If
+End Function
+
+' Logical (zero-fill) right shift of a 64-bit value by n bits (0 <= n < 64).
+Private Function Shr64(a As T64, ByVal n As Long) As T64
+    Dim hi As Long, lo As Long
+    hi = a.hi
+    lo = a.lo
+    If n = 0 Then
+        Shr64.hi = hi
+        Shr64.lo = lo
+    ElseIf n < 32 Then
+        Shr64.hi = RShift(hi, n)
+        Shr64.lo = RShift(lo, n) Or LShift(hi, 32 - n)
+    ElseIf n = 32 Then
+        Shr64.hi = 0
+        Shr64.lo = hi
+    Else
+        Shr64.hi = 0
+        Shr64.lo = RShift(hi, n - 32)
+    End If
+End Function
+
+Private Function bigSigma0_512(x As T64) As T64
+    Dim r1 As T64, r2 As T64, r3 As T64, t As T64
+    r1 = Rotr64(x, 28)
+    r2 = Rotr64(x, 34)
+    r3 = Rotr64(x, 39)
+    t = Xor64(r1, r2)
+    bigSigma0_512 = Xor64(t, r3)
+End Function
+
+Private Function bigSigma1_512(x As T64) As T64
+    Dim r1 As T64, r2 As T64, r3 As T64, t As T64
+    r1 = Rotr64(x, 14)
+    r2 = Rotr64(x, 18)
+    r3 = Rotr64(x, 41)
+    t = Xor64(r1, r2)
+    bigSigma1_512 = Xor64(t, r3)
+End Function
+
+Private Function littleSigma0_512(x As T64) As T64
+    Dim r1 As T64, r2 As T64, r3 As T64, t As T64
+    r1 = Rotr64(x, 1)
+    r2 = Rotr64(x, 8)
+    r3 = Shr64(x, 7)
+    t = Xor64(r1, r2)
+    littleSigma0_512 = Xor64(t, r3)
+End Function
+
+Private Function littleSigma1_512(x As T64) As T64
+    Dim r1 As T64, r2 As T64, r3 As T64, t As T64
+    r1 = Rotr64(x, 19)
+    r2 = Rotr64(x, 61)
+    r3 = Shr64(x, 6)
+    t = Xor64(r1, r2)
+    littleSigma1_512 = Xor64(t, r3)
+End Function
+
+Private Function ch64(x As T64, y As T64, z As T64) As T64
+    Dim nx As T64, t1 As T64, t2 As T64
+    nx = Not64(x)
+    t1 = And64(x, y)
+    t2 = And64(nx, z)
+    ch64 = Xor64(t1, t2)
+End Function
+
+Private Function maj64(x As T64, y As T64, z As T64) As T64
+    Dim t1 As T64, t2 As T64, t3 As T64, t As T64
+    t1 = And64(x, y)
+    t2 = And64(x, z)
+    t3 = And64(y, z)
+    t = Xor64(t1, t2)
+    maj64 = Xor64(t, t3)
+End Function
+
+' Shared SHA-512/SHA-384 compression. Hhi/Hlo hold the eight 64-bit initial
+' hash values (split into high/low halves); outWords is the number of leading
+' 64-bit words to emit (8 for SHA-512, 6 for SHA-384). The words array packs
+' each 64-bit message word as two big-endian Longs, so a 1024-bit block spans
+' 32 Longs.
+Private Function calculateSHA512Core(words() As Long, Hhi, Hlo, ByVal outWords As Long) As Long()
+    Dim Khi As Variant: Khi = Array( _
+        &H428A2F98, &H71374491, &HB5C0FBCF, &HE9B5DBA5, &H3956C25B, &H59F111F1, &H923F82A4, &HAB1C5ED5, _
+        &HD807AA98, &H12835B01, &H243185BE, &H550C7DC3, &H72BE5D74, &H80DEB1FE, &H9BDC06A7, &HC19BF174, _
+        &HE49B69C1, &HEFBE4786, &HFC19DC6, &H240CA1CC, &H2DE92C6F, &H4A7484AA, &H5CB0A9DC, &H76F988DA, _
+        &H983E5152, &HA831C66D, &HB00327C8, &HBF597FC7, &HC6E00BF3, &HD5A79147, &H6CA6351, &H14292967, _
+        &H27B70A85, &H2E1B2138, &H4D2C6DFC, &H53380D13, &H650A7354, &H766A0ABB, &H81C2C92E, &H92722C85, _
+        &HA2BFE8A1, &HA81A664B, &HC24B8B70, &HC76C51A3, &HD192E819, &HD6990624, &HF40E3585, &H106AA070, _
+        &H19A4C116, &H1E376C08, &H2748774C, &H34B0BCB5, &H391C0CB3, &H4ED8AA4A, &H5B9CCA4F, &H682E6FF3, _
+        &H748F82EE, &H78A5636F, &H84C87814, &H8CC70208, &H90BEFFFA, &HA4506CEB, &HBEF9A3F7, &HC67178F2, _
+        &HCA273ECE, &HD186B8C7, &HEADA7DD6, &HF57D4F7F, &H6F067AA, &HA637DC5, &H113F9804, &H1B710B35, _
+        &H28DB77F5, &H32CAAB7B, &H3C9EBE0A, &H431D67C4, &H4CC5D4BE, &H597F299C, &H5FCB6FAB, &H6C44198C)
+    Dim Klo As Variant: Klo = Array( _
+        &HD728AE22, &H23EF65CD, &HEC4D3B2F, &H8189DBBC, &HF348B538, &HB605D019, &HAF194F9B, &HDA6D8118, _
+        &HA3030242, &H45706FBE, &H4EE4B28C, &HD5FFB4E2, &HF27B896F, &H3B1696B1, &H25C71235, &HCF692694, _
+        &H9EF14AD2, &H384F25E3, &H8B8CD5B5, &H77AC9C65, &H592B0275, &H6EA6E483, &HBD41FBD4, &H831153B5, _
+        &HEE66DFAB, &H2DB43210, &H98FB213F, &HBEEF0EE4, &H3DA88FC2, &H930AA725, &HE003826F, &HA0E6E70, _
+        &H46D22FFC, &H5C26C926, &H5AC42AED, &H9D95B3DF, &H8BAF63DE, &H3C77B2A8, &H47EDAEE6, &H1482353B, _
+        &H4CF10364, &HBC423001, &HD0F89791, &H654BE30, &HD6EF5218, &H5565A910, &H5771202A, &H32BBD1B8, _
+        &HB8D2D0C8, &H5141AB53, &HDF8EEB99, &HE19B48A8, &HC5C95A63, &HE3418ACB, &H7763E373, &HD6B2B8A3, _
+        &H5DEFB2FC, &H43172F60, &HA1F0AB72, &H1A6439EC, &H23631E28, &HDE82BDE9, &HB2C67915, &HE372532B, _
+        &HEA26619C, &H21C0C207, &HCDE0EB1E, &HEE6ED178, &H72176FBA, &HA2C898A6, &HBEF90DAE, &H131C471B, _
+        &H23047D84, &H40C72493, &H15C9BEBC, &H9C100D4C, &HCB3E42B6, &HFC657E2A, &H3AD6FAEC, &H4A475817)
+
+    ' hs = hash state. (Named "hs" not "H": VBA identifiers are case-insensitive,
+    ' so an array "H" would collide with the working variable "h" below.)
+    Dim hs(7) As T64
+    Dim i As Long, k As Long
+    For i = 0 To 7
+        hs(i) = mk64(CLng(Hhi(i)), CLng(Hlo(i)))
+    Next i
+
+    Dim W(79) As T64
+    Dim a As T64, b As T64, c As T64, d As T64, e As T64, f As T64, g As T64, h As T64
+    Dim t1 As T64, t2 As T64
+    Dim s0 As T64, s1 As T64, tmp As T64
+    Dim bs1e As T64, chv As T64, kv As T64, bs0a As T64, mjv As T64
+    For k = 0 To UBound(words) Step 32
+        For i = 0 To 15
+            W(i) = mk64(words(k + 2 * i), words(k + 2 * i + 1))
+        Next i
+        For i = 16 To 79
+            s1 = littleSigma1_512(W(i - 2))
+            s0 = littleSigma0_512(W(i - 15))
+            tmp = Add64(s1, W(i - 7))
+            tmp = Add64(tmp, s0)
+            W(i) = Add64(tmp, W(i - 16))
+        Next i
+
+        a = hs(0): b = hs(1): c = hs(2): d = hs(3)
+        e = hs(4): f = hs(5): g = hs(6): h = hs(7)
+
+        For i = 0 To 79
+            bs1e = bigSigma1_512(e)
+            chv = ch64(e, f, g)
+            kv = mk64(CLng(Khi(i)), CLng(Klo(i)))
+            t1 = Add64(h, bs1e)
+            t1 = Add64(t1, chv)
+            t1 = Add64(t1, kv)
+            t1 = Add64(t1, W(i))
+            bs0a = bigSigma0_512(a)
+            mjv = maj64(a, b, c)
+            t2 = Add64(bs0a, mjv)
+            h = g: g = f: f = e
+            e = Add64(d, t1)
+            d = c: c = b: b = a
+            a = Add64(t1, t2)
+        Next i
+
+        hs(0) = Add64(hs(0), a)
+        hs(1) = Add64(hs(1), b)
+        hs(2) = Add64(hs(2), c)
+        hs(3) = Add64(hs(3), d)
+        hs(4) = Add64(hs(4), e)
+        hs(5) = Add64(hs(5), f)
+        hs(6) = Add64(hs(6), g)
+        hs(7) = Add64(hs(7), h)
+    Next k
+
+    Dim result() As Long
+    ReDim result(outWords * 2 - 1)
+    For i = 0 To outWords - 1
+        result(2 * i) = hs(i).hi
+        result(2 * i + 1) = hs(i).lo
+    Next i
+    calculateSHA512Core = result
+End Function
+
 Private Function calculateSHA384(words() As Long) As Long()
-    todo "calculateSHA384"
+    Dim Hhi As Variant: Hhi = Array( _
+        &HCBBB9D5D, &H629A292A, &H9159015A, &H152FECD8, &H67332667, &H8EB44A87, &HDB0C2E0D, &H47B5481D)
+    Dim Hlo As Variant: Hlo = Array( _
+        &HC1059ED8, &H367CD507, &H3070DD17, &HF70E5939, &HFFC00B31, &H68581511, &H64F98FA7, &HBEFA4FA4)
+    calculateSHA384 = calculateSHA512Core(words, Hhi, Hlo, 6)
 End Function
 
 Private Function calculateSHA512(words() As Long) As Long()
-    todo "calculateSHA512"
+    Dim Hhi As Variant: Hhi = Array( _
+        &H6A09E667, &HBB67AE85, &H3C6EF372, &HA54FF53A, &H510E527F, &H9B05688C, &H1F83D9AB, &H5BE0CD19)
+    Dim Hlo As Variant: Hlo = Array( _
+        &HF3BCC908, &H84CAA73B, &HFE94F82B, &H5F1D36F1, &HADE682D1, &H2B3E6C1F, &HFB41BD6B, &H137E2179)
+    calculateSHA512 = calculateSHA512Core(words, Hhi, Hlo, 8)
 End Function
 
 ' Converts a 32-bit Long value to an 8-character hex string in little-endian (reverse order, for MD5).
@@ -576,9 +886,9 @@ Public Sub update(s As String)
         Case "sha256"
             hash = longsToHex(calculateSHA256(StringToWordArraySHA(s)))
         Case "sha384"
-            hash = longsToHex(calculateSHA384(StringToWordArraySHA(s)))
+            hash = longsToHex(calculateSHA384(StringToWordArraySHA512(s)))
         Case "sha512"
-            hash = longsToHex(calculateSHA512(StringToWordArraySHA(s)))
+            hash = longsToHex(calculateSHA512(StringToWordArraySHA512(s)))
     End Select
 End Sub
 
