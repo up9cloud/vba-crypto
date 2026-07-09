@@ -23,7 +23,13 @@ Private m_lOnBits(30)
 Private m_l2Power(30)
 
 Private hashMode As String
-Private hash As String ' save as hex string
+
+' Accumulated message bytes (streaming buffer). mBuf holds mCap allocated bytes,
+' of which the first mLen are the actual message; update() appends, digest()
+' hashes mBuf(0 .. mLen - 1).
+Private mBuf() As Byte
+Private mLen As Long
+Private mCap As Long
 
 ' A 64-bit value, split into two 32-bit halves (VBA's Long is only 32-bit).
 ' Used by the SHA-384/512 implementation, which operates on 64-bit words.
@@ -207,8 +213,7 @@ End Function
 '     [15]  | &H00000000      | 00000000 ' bit length (high dword)
 '
 '   This array can now be used with MD5 core processing.
-Private Function StringToWordArrayMD5(sMessage As String) As Long()
-    Dim lMessageLength As Long
+Private Function bytesToWordArrayMD5(bytes() As Byte, ByVal msgLen As Long) As Long()
     Dim lNumberOfWords As Long
     Dim lWordArray() As Long
     Dim lBytePosition As Long
@@ -218,17 +223,15 @@ Private Function StringToWordArrayMD5(sMessage As String) As Long()
     Const MODULUS_BITS = 512
     Const CONGRUENT_BITS = 448
 
-    lMessageLength = Len(sMessage)
-
-    lNumberOfWords = (((lMessageLength + ((MODULUS_BITS - CONGRUENT_BITS) \ BITS_TO_A_BYTE)) \ (MODULUS_BITS \ BITS_TO_A_BYTE)) + 1) * (MODULUS_BITS \ BITS_TO_A_WORD)
+    lNumberOfWords = (((msgLen + ((MODULUS_BITS - CONGRUENT_BITS) \ BITS_TO_A_BYTE)) \ (MODULUS_BITS \ BITS_TO_A_BYTE)) + 1) * (MODULUS_BITS \ BITS_TO_A_WORD)
     ReDim lWordArray(lNumberOfWords - 1)
 
     lBytePosition = 0
     lByteCount = 0
-    Do Until lByteCount >= lMessageLength
+    Do Until lByteCount >= msgLen
         lWordCount = lByteCount \ BYTES_TO_A_WORD
         lBytePosition = (lByteCount Mod BYTES_TO_A_WORD) * BITS_TO_A_BYTE
-        lWordArray(lWordCount) = lWordArray(lWordCount) Or LShift(Asc(Mid(sMessage, lByteCount + 1, 1)), lBytePosition)
+        lWordArray(lWordCount) = lWordArray(lWordCount) Or LShift(bytes(lByteCount), lBytePosition)
         lByteCount = lByteCount + 1
     Loop
 
@@ -237,10 +240,10 @@ Private Function StringToWordArrayMD5(sMessage As String) As Long()
 
     lWordArray(lWordCount) = lWordArray(lWordCount) Or LShift(&H80, lBytePosition)
 
-    lWordArray(lNumberOfWords - 2) = LShift(lMessageLength, 3)
-    lWordArray(lNumberOfWords - 1) = RShift(lMessageLength, 29)
+    lWordArray(lNumberOfWords - 2) = LShift(msgLen, 3)
+    lWordArray(lNumberOfWords - 1) = RShift(msgLen, 29)
 
-    StringToWordArrayMD5 = lWordArray
+    bytesToWordArrayMD5 = lWordArray
 End Function
 
 ' Converts a string to an array of 32-bit words (big-endian, padding and bit length included)
@@ -261,30 +264,25 @@ End Function
 '     [15] = low dword of message bit length (e.g. 0x00000058 for "hello world")
 '
 '   This array is used for SHA core processing.
-Private Function StringToWordArraySHA(sMessage As String) As Long()
-    Dim lMessageLength  As Long
+Private Function bytesToWordArraySHA(bytes() As Byte, ByVal msgLen As Long) As Long()
     Dim lNumberOfWords  As Long
     Dim lWordArray()    As Long
     Dim lBytePosition   As Long
     Dim lByteCount      As Long
     Dim lWordCount      As Long
-    Dim lByte           As Long
 
     Const MODULUS_BITS As Long = 512
     Const CONGRUENT_BITS As Long = 448
 
-    lMessageLength = Len(sMessage)
-
-    lNumberOfWords = (((lMessageLength + ((MODULUS_BITS - CONGRUENT_BITS) \ BITS_TO_A_BYTE)) \ (MODULUS_BITS \ BITS_TO_A_BYTE)) + 1) * (MODULUS_BITS \ BITS_TO_A_WORD)
+    lNumberOfWords = (((msgLen + ((MODULUS_BITS - CONGRUENT_BITS) \ BITS_TO_A_BYTE)) \ (MODULUS_BITS \ BITS_TO_A_BYTE)) + 1) * (MODULUS_BITS \ BITS_TO_A_WORD)
     ReDim lWordArray(lNumberOfWords - 1)
 
     lBytePosition = 0
     lByteCount = 0
-    Do Until lByteCount >= lMessageLength
+    Do Until lByteCount >= msgLen
         lWordCount = lByteCount \ BYTES_TO_A_WORD
         lBytePosition = (3 - (lByteCount Mod BYTES_TO_A_WORD)) * BITS_TO_A_BYTE
-        lByte = AscB(Mid(sMessage, lByteCount + 1, 1))
-        lWordArray(lWordCount) = lWordArray(lWordCount) Or LShift(lByte, lBytePosition)
+        lWordArray(lWordCount) = lWordArray(lWordCount) Or LShift(bytes(lByteCount), lBytePosition)
         lByteCount = lByteCount + 1
     Loop
 
@@ -293,43 +291,38 @@ Private Function StringToWordArraySHA(sMessage As String) As Long()
 
     lWordArray(lWordCount) = lWordArray(lWordCount) Or LShift(&H80, lBytePosition)
 
-    lWordArray(lNumberOfWords - 1) = LShift(lMessageLength, 3)
-    lWordArray(lNumberOfWords - 2) = RShift(lMessageLength, 29)
+    lWordArray(lNumberOfWords - 1) = LShift(msgLen, 3)
+    lWordArray(lNumberOfWords - 2) = RShift(msgLen, 29)
 
-    StringToWordArraySHA = lWordArray
+    bytesToWordArraySHA = lWordArray
 End Function
 
-' Converts a string to an array of 32-bit words (big-endian) padded to 1024-bit
-' blocks with a 128-bit message-length field, as required for SHA-384/SHA-512.
+' Converts msgLen bytes to an array of 32-bit words (big-endian) padded to
+' 1024-bit blocks with a 128-bit message-length field, for SHA-384/SHA-512.
 '
-' The layout matches StringToWordArraySHA but uses 1024-bit blocks (32 Longs
+' The layout matches bytesToWordArraySHA but uses 1024-bit blocks (32 Longs
 ' each) and reserves the final 16 bytes for the length. Each 64-bit SHA word is
-' therefore the pair (lWordArray(2j), lWordArray(2j + 1)). For string inputs the
-' bit length always fits in the low 64 bits, so the upper Longs stay zero.
-Private Function StringToWordArraySHA512(sMessage As String) As Long()
-    Dim lMessageLength  As Long
+' therefore the pair (lWordArray(2j), lWordArray(2j + 1)). msgLen*8 always fits
+' in the low 64 bits, so the upper two length Longs stay zero.
+Private Function bytesToWordArraySHA512(bytes() As Byte, ByVal msgLen As Long) As Long()
     Dim lNumberOfWords  As Long
     Dim lWordArray()    As Long
     Dim lBytePosition   As Long
     Dim lByteCount      As Long
     Dim lWordCount      As Long
-    Dim lByte           As Long
 
     Const MODULUS_BITS As Long = 1024
     Const CONGRUENT_BITS As Long = 896
 
-    lMessageLength = Len(sMessage)
-
-    lNumberOfWords = (((lMessageLength + ((MODULUS_BITS - CONGRUENT_BITS) \ BITS_TO_A_BYTE)) \ (MODULUS_BITS \ BITS_TO_A_BYTE)) + 1) * (MODULUS_BITS \ BITS_TO_A_WORD)
+    lNumberOfWords = (((msgLen + ((MODULUS_BITS - CONGRUENT_BITS) \ BITS_TO_A_BYTE)) \ (MODULUS_BITS \ BITS_TO_A_BYTE)) + 1) * (MODULUS_BITS \ BITS_TO_A_WORD)
     ReDim lWordArray(lNumberOfWords - 1)
 
     lBytePosition = 0
     lByteCount = 0
-    Do Until lByteCount >= lMessageLength
+    Do Until lByteCount >= msgLen
         lWordCount = lByteCount \ BYTES_TO_A_WORD
         lBytePosition = (3 - (lByteCount Mod BYTES_TO_A_WORD)) * BITS_TO_A_BYTE
-        lByte = AscB(Mid(sMessage, lByteCount + 1, 1))
-        lWordArray(lWordCount) = lWordArray(lWordCount) Or LShift(lByte, lBytePosition)
+        lWordArray(lWordCount) = lWordArray(lWordCount) Or LShift(bytes(lByteCount), lBytePosition)
         lByteCount = lByteCount + 1
     Loop
 
@@ -338,10 +331,10 @@ Private Function StringToWordArraySHA512(sMessage As String) As Long()
 
     lWordArray(lWordCount) = lWordArray(lWordCount) Or LShift(&H80, lBytePosition)
 
-    lWordArray(lNumberOfWords - 1) = LShift(lMessageLength, 3)
-    lWordArray(lNumberOfWords - 2) = RShift(lMessageLength, 29)
+    lWordArray(lNumberOfWords - 1) = LShift(msgLen, 3)
+    lWordArray(lNumberOfWords - 2) = RShift(msgLen, 29)
 
-    StringToWordArraySHA512 = lWordArray
+    bytesToWordArraySHA512 = lWordArray
 End Function
 
 Private Function todo(s)
@@ -349,7 +342,15 @@ Private Function todo(s)
 End Function
 
 Public Sub createHash(Optional ByVal name As String = "sha256")
-  hashMode = name
+    Select Case LCase(name)
+        Case "md5", "sha1", "sha224", "sha256", "sha384", "sha512", "sha512-256", "sha512-224"
+            hashMode = LCase(name)
+        Case Else
+            Err.Raise vbObjectError + 1, "CRYPTO.createHash", "unknown hash algorithm: " & name
+    End Select
+    mLen = 0
+    mCap = 0
+    Erase mBuf
 End Sub
 
 Private Function calculateMD5(words() AS Long) AS Long()
@@ -503,7 +504,10 @@ Private Function calculateSHA1(words() As Long) As Long()
     calculateSHA1 = H
 End Function
 
-Private Function calculateSHA256(words() AS Long) AS Long()
+' SHA-256 / SHA-224 compression core. iv is an 8-element array of the initial
+' hash values (SHA-256 and SHA-224 differ only in iv and in the output length,
+' which the caller truncates). Returns the full 8-word (256-bit) state.
+Private Function calculateSHA256Core(words() As Long, iv) As Long()
     Dim kVals As Variant: kVals = Array( _
         &H428A2F98, &H71374491, &HB5C0FBCF, &HE9B5DBA5, &H3956C25B, &H59F111F1, &H923F82A4, &HAB1C5ED5, _
         &HD807AA98, &H12835B01, &H243185BE, &H550C7DC3, &H72BE5D74, &H80DEB1FE, &H9BDC06A7, &HC19BF174, _
@@ -514,14 +518,10 @@ Private Function calculateSHA256(words() AS Long) AS Long()
         &H19A4C116, &H1E376C08, &H2748774C, &H34B0BCB5, &H391C0CB3, &H4ED8AA4A, &H5B9CCA4F, &H682E6FF3, _
         &H748F82EE, &H78A5636F, &H84C87814, &H8CC70208, &H90BEFFFA, &HA4506CEB, &HBEF9A3F7, &HC67178F2)
     Dim result(7) As Long
-    result(0) = &H6A09E667
-    result(1) = &HBB67AE85
-    result(2) = &H3C6EF372
-    result(3) = &HA54FF53A
-    result(4) = &H510E527F
-    result(5) = &H9B05688C
-    result(6) = &H1F83D9AB
-    result(7) = &H5BE0CD19
+    Dim m As Long
+    For m = 0 To 7
+        result(m) = CLng(iv(m))
+    Next m
     Dim W(63)   As Long
     Dim k, i, j, t1, t2
     Dim a As Long
@@ -567,7 +567,7 @@ Private Function calculateSHA256(words() AS Long) AS Long()
         result(6) = AddUnsigned(g, result(6))
         result(7) = AddUnsigned(h, result(7))
     Next
-    calculateSHA256 = result
+    calculateSHA256Core = result
 End Function
 
 ' --- 64-bit helpers -----------------------------------------------------------
@@ -727,12 +727,11 @@ Private Function maj64(x As T64, y As T64, z As T64) As T64
     maj64 = Xor64(t, t3)
 End Function
 
-' Shared SHA-512/SHA-384 compression. Hhi/Hlo hold the eight 64-bit initial
-' hash values (split into high/low halves); outWords is the number of leading
-' 64-bit words to emit (8 for SHA-512, 6 for SHA-384). The words array packs
-' each 64-bit message word as two big-endian Longs, so a 1024-bit block spans
-' 32 Longs.
-Private Function calculateSHA512Core(words() As Long, Hhi, Hlo, ByVal outWords As Long) As Long()
+' SHA-512 family compression core. Hhi/Hlo are the eight 64-bit initial hash
+' values (high/low halves). Returns the full 8-word (512-bit) state as 16 Longs
+' (hi, lo, hi, lo, ...); shorter variants (384, 512/256, 512/224) are produced by
+' the caller truncating the byte output.
+Private Function calculateSHA512Core(words() As Long, Hhi, Hlo) As Long()
     Dim Khi As Variant: Khi = Array( _
         &H428A2F98, &H71374491, &HB5C0FBCF, &HE9B5DBA5, &H3956C25B, &H59F111F1, &H923F82A4, &HAB1C5ED5, _
         &HD807AA98, &H12835B01, &H243185BE, &H550C7DC3, &H72BE5D74, &H80DEB1FE, &H9BDC06A7, &HC19BF174, _
@@ -812,84 +811,189 @@ Private Function calculateSHA512Core(words() As Long, Hhi, Hlo, ByVal outWords A
     Next k
 
     Dim result() As Long
-    ReDim result(outWords * 2 - 1)
-    For i = 0 To outWords - 1
+    ReDim result(15)
+    For i = 0 To 7
         result(2 * i) = hs(i).hi
         result(2 * i + 1) = hs(i).lo
     Next i
     calculateSHA512Core = result
 End Function
 
-Private Function calculateSHA384(words() As Long) As Long()
-    Dim Hhi As Variant: Hhi = Array( _
-        &HCBBB9D5D, &H629A292A, &H9159015A, &H152FECD8, &H67332667, &H8EB44A87, &HDB0C2E0D, &H47B5481D)
-    Dim Hlo As Variant: Hlo = Array( _
-        &HC1059ED8, &H367CD507, &H3070DD17, &HF70E5939, &HFFC00B31, &H68581511, &H64F98FA7, &HBEFA4FA4)
-    calculateSHA384 = calculateSHA512Core(words, Hhi, Hlo, 6)
-End Function
-
-Private Function calculateSHA512(words() As Long) As Long()
-    Dim Hhi As Variant: Hhi = Array( _
-        &H6A09E667, &HBB67AE85, &H3C6EF372, &HA54FF53A, &H510E527F, &H9B05688C, &H1F83D9AB, &H5BE0CD19)
-    Dim Hlo As Variant: Hlo = Array( _
-        &HF3BCC908, &H84CAA73B, &HFE94F82B, &H5F1D36F1, &HADE682D1, &H2B3E6C1F, &HFB41BD6B, &H137E2179)
-    calculateSHA512 = calculateSHA512Core(words, Hhi, Hlo, 8)
-End Function
-
-' Converts a 32-bit Long value to an 8-character hex string in little-endian (reverse order, for MD5).
-' Example:
-'   longToHexLE(&H12345678) => "78563412"
-Private Function longToHexLE(lValue As Long) As String
-    Dim lByte As Long
-    Dim lCount As Long
-    For lCount = 0 To 3
-        lByte = RShift(lValue, lCount * BITS_TO_A_BYTE) And m_lOnBits(BITS_TO_A_BYTE - 1)
-        longToHexLE = longToHexLE & Right("0" & Hex(lByte), 2)
-    Next
-End Function
-
-' Converts an array of Longs to a hex string using longToHexLE (little-endian byte order), mainly for MD5 output.
-' Example:
-'   longsToHexLE(Array(&H12345678, &H9ABCDEF0)) => "78563412f0debc9a"
-Private Function longsToHexLE(arr() As Long) As String
-    Dim i As Long, hexStr As String
-    For i = 0 To UBound(arr)
-        hexStr = hexStr & longToHexLE(arr(i))
+' Converts an array of Longs to its big-endian byte sequence (for SHA output).
+Private Function longsToBytesBE(arr() As Long) As Byte()
+    Dim bytes() As Byte
+    Dim i As Long, v As Long, base As Long
+    ReDim bytes((UBound(arr) - LBound(arr) + 1) * 4 - 1)
+    For i = 0 To UBound(arr) - LBound(arr)
+        v = arr(LBound(arr) + i)
+        base = i * 4
+        bytes(base) = CByte(RShift(v, 24) And &HFF&)
+        bytes(base + 1) = CByte(RShift(v, 16) And &HFF&)
+        bytes(base + 2) = CByte(RShift(v, 8) And &HFF&)
+        bytes(base + 3) = CByte(v And &HFF&)
     Next i
-    longsToHexLE = LCase(hexStr)
+    longsToBytesBE = bytes
 End Function
 
-' Converts a 32-bit Long value to an 8-character hex string in big-endian (standard order, for SHA algorithms).
-' Example:
-'   longToHex(&H12345678) => "12345678"
-Private Function longToHex(lValue As Long) As String
-    longToHex = Right("00000000" & Hex(lValue), 8)
-End Function
-
-' Converts an array of Longs to a hex string using longToHex (big-endian byte order), mainly for SHA1/SHA256 output.
-' Example:
-'   longsToHex(Array(&H12345678, &H9ABCDEF0))  => "123456789abcdef0"
-Private Function longsToHex(arr() As Long) As String
-    Dim i As Long, hexStr As String
-    For i = 0 To UBound(arr)
-        hexStr = hexStr & longToHex(arr(i))
+' Converts an array of Longs to its little-endian byte sequence (for MD5 output).
+Private Function longsToBytesLE(arr() As Long) As Byte()
+    Dim bytes() As Byte
+    Dim i As Long, v As Long, base As Long
+    ReDim bytes((UBound(arr) - LBound(arr) + 1) * 4 - 1)
+    For i = 0 To UBound(arr) - LBound(arr)
+        v = arr(LBound(arr) + i)
+        base = i * 4
+        bytes(base) = CByte(v And &HFF&)
+        bytes(base + 1) = CByte(RShift(v, 8) And &HFF&)
+        bytes(base + 2) = CByte(RShift(v, 16) And &HFF&)
+        bytes(base + 3) = CByte(RShift(v, 24) And &HFF&)
     Next i
-    longsToHex = LCase(hexStr)
+    longsToBytesLE = bytes
 End Function
 
-Public Sub update(s As String)
+' Returns the first n bytes of b (used to truncate to a shorter digest length).
+Private Function truncateBytes(b() As Byte, ByVal n As Long) As Byte()
+    Dim r() As Byte, i As Long
+    ReDim r(n - 1)
+    For i = 0 To n - 1
+        r(i) = b(i)
+    Next i
+    truncateBytes = r
+End Function
+
+' Encodes a VBA (UTF-16) string as UTF-8 bytes, matching how Node/openssl hash
+' text. Handles the full BMP plus surrogate pairs (code points > U+FFFF).
+' Returns an unallocated (zero-length) array for an empty string.
+Private Function utf8Bytes(s As String) As Byte()
+    Dim outArr() As Byte
+    Dim cap As Long, cnt As Long, i As Long, L As Long
+    Dim cu As Long, cu2 As Long, cp As Long
+    L = Len(s)
+    If L = 0 Then Exit Function
+    cap = L + 8
+    ReDim outArr(cap - 1)
+    i = 1
+    Do While i <= L
+        cu = AscW(Mid(s, i, 1)) And &HFFFF&
+        If cu >= &HD800& And cu <= &HDBFF& And i < L Then
+            cu2 = AscW(Mid(s, i + 1, 1)) And &HFFFF&
+            If cu2 >= &HDC00& And cu2 <= &HDFFF& Then
+                cp = &H10000 + ((cu - &HD800&) * &H400&) + (cu2 - &HDC00&)
+                i = i + 1
+            Else
+                cp = cu
+            End If
+        Else
+            cp = cu
+        End If
+        i = i + 1
+
+        If cnt + 4 > cap Then
+            cap = cap * 2
+            ReDim Preserve outArr(cap - 1)
+        End If
+
+        If cp < &H80 Then
+            outArr(cnt) = CByte(cp): cnt = cnt + 1
+        ElseIf cp < &H800 Then
+            outArr(cnt) = CByte(&HC0 Or RShift(cp, 6)): cnt = cnt + 1
+            outArr(cnt) = CByte(&H80 Or (cp And &H3F)): cnt = cnt + 1
+        ElseIf cp < &H10000 Then
+            outArr(cnt) = CByte(&HE0 Or RShift(cp, 12)): cnt = cnt + 1
+            outArr(cnt) = CByte(&H80 Or (RShift(cp, 6) And &H3F)): cnt = cnt + 1
+            outArr(cnt) = CByte(&H80 Or (cp And &H3F)): cnt = cnt + 1
+        Else
+            outArr(cnt) = CByte(&HF0 Or RShift(cp, 18)): cnt = cnt + 1
+            outArr(cnt) = CByte(&H80 Or (RShift(cp, 12) And &H3F)): cnt = cnt + 1
+            outArr(cnt) = CByte(&H80 Or (RShift(cp, 6) And &H3F)): cnt = cnt + 1
+            outArr(cnt) = CByte(&H80 Or (cp And &H3F)): cnt = cnt + 1
+        End If
+    Loop
+    ReDim Preserve outArr(cnt - 1)
+    utf8Bytes = outArr
+End Function
+
+' Number of elements in a Byte array, or 0 if it is unallocated.
+Private Function byteLen(b() As Byte) As Long
+    On Error Resume Next
+    byteLen = UBound(b) - LBound(b) + 1
+    If Err.Number <> 0 Then byteLen = 0
+    On Error GoTo 0
+End Function
+
+' Grows mBuf so it can hold at least `need` bytes (doubling to keep appends cheap).
+Private Sub ensureCapacity(ByVal need As Long)
+    If need <= mCap Then Exit Sub
+    Dim newCap As Long
+    newCap = mCap
+    If newCap < 64 Then newCap = 64
+    Do While newCap < need
+        newCap = newCap * 2
+    Loop
+    ReDim Preserve mBuf(newCap - 1)
+    mCap = newCap
+End Sub
+
+' Appends src to the message buffer.
+Private Sub appendBytes(src() As Byte)
+    Dim n As Long, i As Long
+    n = byteLen(src)
+    If n = 0 Then Exit Sub
+    ensureCapacity mLen + n
+    For i = 0 To n - 1
+        mBuf(mLen + i) = src(LBound(src) + i)
+    Next i
+    mLen = mLen + n
+End Sub
+
+' Computes the raw digest bytes of the buffered message for the current hashMode.
+Private Function computeRaw() As Byte()
+    Dim iv As Variant, Hhi As Variant, Hlo As Variant
     Select Case hashMode
         Case "md5"
-            hash = longsToHexLE(calculateMD5(StringToWordArrayMD5(s)))
+            computeRaw = longsToBytesLE(calculateMD5(bytesToWordArrayMD5(mBuf, mLen)))
         Case "sha1"
-            hash = longsToHex(calculateSHA1(StringToWordArraySHA(s)))
+            computeRaw = longsToBytesBE(calculateSHA1(bytesToWordArraySHA(mBuf, mLen)))
+        Case "sha224"
+            iv = Array(&HC1059ED8, &H367CD507, &H3070DD17, &HF70E5939, &HFFC00B31, &H68581511, &H64F98FA7, &HBEFA4FA4)
+            computeRaw = truncateBytes(longsToBytesBE(calculateSHA256Core(bytesToWordArraySHA(mBuf, mLen), iv)), 28)
         Case "sha256"
-            hash = longsToHex(calculateSHA256(StringToWordArraySHA(s)))
+            iv = Array(&H6A09E667, &HBB67AE85, &H3C6EF372, &HA54FF53A, &H510E527F, &H9B05688C, &H1F83D9AB, &H5BE0CD19)
+            computeRaw = longsToBytesBE(calculateSHA256Core(bytesToWordArraySHA(mBuf, mLen), iv))
         Case "sha384"
-            hash = longsToHex(calculateSHA384(StringToWordArraySHA512(s)))
+            Hhi = Array(&HCBBB9D5D, &H629A292A, &H9159015A, &H152FECD8, &H67332667, &H8EB44A87, &HDB0C2E0D, &H47B5481D)
+            Hlo = Array(&HC1059ED8, &H367CD507, &H3070DD17, &HF70E5939, &HFFC00B31, &H68581511, &H64F98FA7, &HBEFA4FA4)
+            computeRaw = truncateBytes(longsToBytesBE(calculateSHA512Core(bytesToWordArraySHA512(mBuf, mLen), Hhi, Hlo)), 48)
         Case "sha512"
-            hash = longsToHex(calculateSHA512(StringToWordArraySHA512(s)))
+            Hhi = Array(&H6A09E667, &HBB67AE85, &H3C6EF372, &HA54FF53A, &H510E527F, &H9B05688C, &H1F83D9AB, &H5BE0CD19)
+            Hlo = Array(&HF3BCC908, &H84CAA73B, &HFE94F82B, &H5F1D36F1, &HADE682D1, &H2B3E6C1F, &HFB41BD6B, &H137E2179)
+            computeRaw = longsToBytesBE(calculateSHA512Core(bytesToWordArraySHA512(mBuf, mLen), Hhi, Hlo))
+        Case "sha512-256"
+            Hhi = Array(&H22312194, &H9F555FA3, &H2393B86B, &H96387719, &H96283EE2, &HBE5E1E25, &H2B0199FC, &HEB72DDC)
+            Hlo = Array(&HFC2BF72C, &HC84C64C2, &H6F53B151, &H5940EABD, &HA88EFFE3, &H53863992, &H2C85B8AA, &H81C52CA2)
+            computeRaw = truncateBytes(longsToBytesBE(calculateSHA512Core(bytesToWordArraySHA512(mBuf, mLen), Hhi, Hlo)), 32)
+        Case "sha512-224"
+            Hhi = Array(&H8C3D37C8, &H73E19966, &H1DFAB7AE, &H679DD514, &HF6D2B69, &H77E36F73, &H3F9D85A8, &H1112E6AD)
+            Hlo = Array(&H19544DA2, &H89DCD4D6, &H32FF9C82, &H582F9FCF, &H7BD44DA8, &H4C48942, &H6A1D36C8, &H91D692A1)
+            computeRaw = truncateBytes(longsToBytesBE(calculateSHA512Core(bytesToWordArraySHA512(mBuf, mLen), Hhi, Hlo)), 28)
+        Case Else
+            Err.Raise vbObjectError + 1, "CRYPTO", "unknown hash algorithm: " & hashMode
     End Select
+End Function
+
+' Appends data to the message. data may be a String (encoded as UTF-8) or a
+' Byte array. Call repeatedly to hash data in pieces, then finalize with digest.
+Public Sub update(data)
+    Dim b() As Byte
+    Select Case VarType(data)
+        Case vbString
+            b = utf8Bytes(CStr(data))
+        Case vbArray + vbByte
+            b = data
+        Case Else
+            Err.Raise 5, "CRYPTO.update", "update expects a String or a Byte array"
+    End Select
+    appendBytes b
 End Sub
 
 Private Function bytesToHex(bytes() As Byte) As String
@@ -956,13 +1060,22 @@ Private Function hexToBase64(hexString As String) As String
     hexToBase64 = bytesToBase64(hexToBytes(hexString))
 End Function
 
+' Returns the digest as a hex ("hex") or Base64 ("base64") string. May be called
+' more than once; it does not consume the buffered message.
 Public Function digest(Optional ByVal mode As String = "hex") As String
-    Select Case mode
+    Dim raw() As Byte
+    raw = computeRaw()
+    Select Case LCase(mode)
         Case "hex"
-            digest = hash
+            digest = bytesToHex(raw)
         Case "base64"
-            digest = hexToBase64(hash)
+            digest = bytesToBase64(raw)
         Case Else
-            todo mode
+            Err.Raise 5, "CRYPTO.digest", "unknown output mode: " & mode
     End Select
+End Function
+
+' Returns the digest as a raw Byte array.
+Public Function digestBytes() As Byte()
+    digestBytes = computeRaw()
 End Function

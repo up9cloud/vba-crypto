@@ -7,20 +7,49 @@ crypto library for VBA.
 - Download `./src/CRYPTO.cls`
 - Open your excel file, go to the macro editor `Microsoft Visual Basic for Applications` (ALT + F11)
 - Go to: File > Import File, to choose the `CRYPTO.cls` file from your download folder.
-- 
 
 ```vb
 Function hash(s)
   Dim o As New CRYPTO
-  o.createHash("sha256") ' md5, sha256, sha384, sha512
-  o.update(s)
-  hash = o.digest("hex") ' hex, base64
+  o.createHash "sha256"   ' md5, sha1, sha224, sha256, sha384, sha512, sha512-256, sha512-224
+  o.update s
+  hash = o.digest("hex")  ' hex, base64
   Set o = Nothing
 End Function
 
 Debug.Print hash("hello world")
-' b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9'
+' b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
 ```
+
+### API
+
+- `createHash(name)` — pick the algorithm (see the list above). Also resets the object so it can be reused.
+- `update(data)` — feed data. `data` may be a `String` (encoded as **UTF-8**, so non-ASCII matches openssl/Node) or a `Byte` array. Call it multiple times to hash data in pieces:
+
+  ```vb
+  Dim o As New CRYPTO
+  o.createHash "sha256"
+  o.update "hello "
+  o.update "world"       ' same result as hashing "hello world" at once
+  Debug.Print o.digest("hex")
+  ```
+
+- `digest(mode)` — finalize as a `"hex"` or `"base64"` string. It does not consume the buffer, so it can be called more than once.
+- `digestBytes()` — finalize as a raw `Byte()` array.
+
+Unknown algorithm or output-mode names raise a run-time error rather than returning an empty string.
+
+### Testing
+
+`src/CRYPTO.test.bas` is a self-contained test suite (known-answer vectors, padding-boundary lengths, UTF-8, byte input, streaming, and error cases).
+
+1. Import both `CRYPTO.cls` and `CRYPTO.test.bas` into the VBA project.
+2. Open the Immediate window with `Ctrl+G`, type `testAll`, and press Enter.
+3. The last line prints e.g. `48 passed, 0 failed`; any failure prints the expected and actual digests above the summary.
+
+### Limitations
+
+The message length is tracked in bytes as a 32-bit value, so inputs larger than ~256 MB are not supported (well beyond typical spreadsheet use).
 
 The above works the same way as the following does with .NET objects:
 
