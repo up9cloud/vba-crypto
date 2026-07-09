@@ -90,6 +90,7 @@ Private Sub testAll()
     testUtf8
     testBytesInput
     testStreaming
+    testHmac
     testErrors
 
     Debug.Print "-----------------------------------------"
@@ -130,6 +131,51 @@ Private Sub testStreaming()
 
     ' digest() is repeatable and does not consume the buffer.
     assertEqual "digest is repeatable", "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9", c.digest("hex")
+End Sub
+
+' HMAC one-shot helper (String key + String message).
+Private Sub testHmacStr(ByVal mode As String, ByVal key As String, ByVal msg As String, ByVal expected As String)
+    Dim c As CRYPTO: Set c = New CRYPTO
+    c.createHmac mode, key
+    c.update msg
+    assertEqual "hmac-" & mode & " / keylen=" & Len(key), expected, c.digest("hex")
+End Sub
+
+' HMAC known-answer vectors (RFC 2202 / 4231 style), all algorithms, plus keys
+' that are empty, exactly the block size, and longer than the block (hashed down).
+Private Sub testHmac()
+    testHmacStr "sha256", "key", "The quick brown fox jumps over the lazy dog", "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
+    testHmacStr "sha1", "key", "The quick brown fox jumps over the lazy dog", "de7c9b85b8b78aa6bc8a7a36f70a90701c9db4d9"
+    testHmacStr "md5", "key", "The quick brown fox jumps over the lazy dog", "80070713463e7749b90c2dc24911e275"
+    testHmacStr "sha256", "", "", "b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad"
+    testHmacStr "sha256", "secret", "", "f9e66e179b6747ae54108f82f8ade8b3c25d76fd30afde6c395822c530196169"
+    testHmacStr "sha224", "key", "hello world", "818a1ce4c3a9ebc0506529a83234d9c77926b614892dbd62658444f4"
+    testHmacStr "sha512", "key", "hello world", "ea0625a5ff1cd1653a327f8a4ae2f478fc51405c73ddac3a8a05a7a810310a6a14d7c8b4d284013493a6016ecadc772cfd98ed6cbe745949c5e6119fafb63b54"
+    testHmacStr "sha384", "key", "hello world", "b7e365fa38bb22d6553614a63095564a0411866e65aac7b835d02d0b24245f4dc48696c9d970ac20f24105be7dc60133"
+    testHmacStr "sha512-256", "key", "hello world", "0ba53ab0afef0dec4ff94412bfffa096ba69c40fb03319308b8fc23f53e3661d"
+    testHmacStr "sha512-224", "key", "hello world", "a8e5289077249fdfe86fa129bafd135b3ff0c3cfb1ad587887f5e247"
+
+    ' key longer than the block is hashed down first (64-byte and 128-byte blocks)
+    testHmacStr "sha256", String(100, "a"), "msg", "1b110355f805afa1c9cbb6cf7065062139d2fb7b9eb28c7ae7581ea99cff6b8e"
+    testHmacStr "sha512", String(200, "a"), "msg", "a31fbe02f4a9d748da17b18a8ba6dbce437bc2c1570eb220175203c2e30f3436f127b88c973b7308ab1295dab2a116c9b5d8e22fef562d58f87912afa8be9668"
+    ' key exactly one block long
+    testHmacStr "sha256", String(64, "k"), "exactly-block-key", "7c746358b2c7e9e4eff6c562edb13a9f65c24e51afe61607aac5da8d8f4a4dce"
+
+    ' HMAC also supports a Byte-array key and streaming update()
+    Dim c As CRYPTO: Set c = New CRYPTO
+    Dim kb(9) As Byte, i As Long
+    For i = 0 To 9
+        kb(i) = CByte(i)
+    Next i
+    c.createHmac "sha256", kb
+    c.update "data"
+    assertEqual "hmac byte-key sha256", "cd8b852f159404c44469ac7b8dca5c830d96ef0bc1a8f917fece641ff696a840", c.digest("hex")
+
+    Set c = New CRYPTO
+    c.createHmac "sha256", "key"
+    c.update "The quick brown fox "
+    c.update "jumps over the lazy dog"
+    assertEqual "hmac streaming sha256", "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8", c.digest("hex")
 End Sub
 
 ' Unknown algorithm / output mode must raise instead of failing silently.

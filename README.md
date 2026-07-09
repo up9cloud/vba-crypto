@@ -21,9 +21,22 @@ Debug.Print hash("hello world")
 ' b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
 ```
 
+### HMAC
+
+Use `createHmac(name, key)` instead of `createHash`; everything else is the same. The key may be a `String` (UTF-8) or a `Byte` array.
+
+```vb
+Dim o As New CRYPTO
+o.createHmac "sha256", "my-secret-key"
+o.update "message"
+Debug.Print o.digest("hex")
+' 1423df78108155d1bef5dac2bb5d8eae873eb35b417c0184d6a33416b669136e
+```
+
 ### API
 
 - `createHash(name)` — pick the algorithm (see the list above). Also resets the object so it can be reused.
+- `createHmac(name, key)` — start an HMAC with the given algorithm and key (String or Byte array).
 - `update(data)` — feed data. `data` may be a `String` (encoded as **UTF-8**, so non-ASCII matches openssl/Node) or a `Byte` array. Call it multiple times to hash data in pieces:
 
   ```vb
@@ -45,7 +58,7 @@ Unknown algorithm or output-mode names raise a run-time error rather than return
 
 1. Import both `CRYPTO.cls` and `CRYPTO.test.bas` into the VBA project.
 2. Open the Immediate window with `Ctrl+G`, type `testAll`, and press Enter.
-3. The last line prints e.g. `48 passed, 0 failed`; any failure prints the expected and actual digests above the summary.
+3. The last line prints e.g. `63 passed, 0 failed`; any failure prints the expected and actual digests above the summary.
 
 ### Limitations
 

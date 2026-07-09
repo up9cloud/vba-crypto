@@ -31,6 +31,10 @@ Private mBuf() As Byte
 Private mLen As Long
 Private mCap As Long
 
+' HMAC state: when isHmac is set, digest() keys the hash with hmacKeyBytes.
+Private isHmac As Boolean
+Private hmacKeyBytes() As Byte
+
 ' A 64-bit value, split into two 32-bit halves (VBA's Long is only 32-bit).
 ' Used by the SHA-384/512 implementation, which operates on 64-bit words.
 Private Type T64
@@ -351,6 +355,24 @@ Public Sub createHash(Optional ByVal name As String = "sha256")
     mLen = 0
     mCap = 0
     Erase mBuf
+    isHmac = False
+    Erase hmacKeyBytes
+End Sub
+
+' Starts an HMAC keyed by `key` (a String, encoded as UTF-8, or a Byte array)
+' using hash algorithm `name`. Then feed the message with update() and finalize
+' with digest()/digestBytes(), exactly as for a plain hash.
+Public Sub createHmac(Optional ByVal name As String = "sha256", Optional key As Variant = "")
+    createHash name
+    Select Case VarType(key)
+        Case vbString
+            hmacKeyBytes = utf8Bytes(CStr(key))
+        Case vbArray + vbByte
+            hmacKeyBytes = key
+        Case Else
+            Err.Raise 5, "CRYPTO.createHmac", "key must be a String or a Byte array"
+    End Select
+    isHmac = True
 End Sub
 
 Private Function calculateMD5(words() AS Long) AS Long()
@@ -946,39 +968,100 @@ Private Sub appendBytes(src() As Byte)
     mLen = mLen + n
 End Sub
 
-' Computes the raw digest bytes of the buffered message for the current hashMode.
-Private Function computeRaw() As Byte()
+' Hashes the first n bytes of `bytes` with the current hashMode and returns the
+' raw digest bytes.
+Private Function rawHash(bytes() As Byte, ByVal n As Long) As Byte()
     Dim iv As Variant, Hhi As Variant, Hlo As Variant
     Select Case hashMode
         Case "md5"
-            computeRaw = longsToBytesLE(calculateMD5(bytesToWordArrayMD5(mBuf, mLen)))
+            rawHash = longsToBytesLE(calculateMD5(bytesToWordArrayMD5(bytes, n)))
         Case "sha1"
-            computeRaw = longsToBytesBE(calculateSHA1(bytesToWordArraySHA(mBuf, mLen)))
+            rawHash = longsToBytesBE(calculateSHA1(bytesToWordArraySHA(bytes, n)))
         Case "sha224"
             iv = Array(&HC1059ED8, &H367CD507, &H3070DD17, &HF70E5939, &HFFC00B31, &H68581511, &H64F98FA7, &HBEFA4FA4)
-            computeRaw = truncateBytes(longsToBytesBE(calculateSHA256Core(bytesToWordArraySHA(mBuf, mLen), iv)), 28)
+            rawHash = truncateBytes(longsToBytesBE(calculateSHA256Core(bytesToWordArraySHA(bytes, n), iv)), 28)
         Case "sha256"
             iv = Array(&H6A09E667, &HBB67AE85, &H3C6EF372, &HA54FF53A, &H510E527F, &H9B05688C, &H1F83D9AB, &H5BE0CD19)
-            computeRaw = longsToBytesBE(calculateSHA256Core(bytesToWordArraySHA(mBuf, mLen), iv))
+            rawHash = longsToBytesBE(calculateSHA256Core(bytesToWordArraySHA(bytes, n), iv))
         Case "sha384"
             Hhi = Array(&HCBBB9D5D, &H629A292A, &H9159015A, &H152FECD8, &H67332667, &H8EB44A87, &HDB0C2E0D, &H47B5481D)
             Hlo = Array(&HC1059ED8, &H367CD507, &H3070DD17, &HF70E5939, &HFFC00B31, &H68581511, &H64F98FA7, &HBEFA4FA4)
-            computeRaw = truncateBytes(longsToBytesBE(calculateSHA512Core(bytesToWordArraySHA512(mBuf, mLen), Hhi, Hlo)), 48)
+            rawHash = truncateBytes(longsToBytesBE(calculateSHA512Core(bytesToWordArraySHA512(bytes, n), Hhi, Hlo)), 48)
         Case "sha512"
             Hhi = Array(&H6A09E667, &HBB67AE85, &H3C6EF372, &HA54FF53A, &H510E527F, &H9B05688C, &H1F83D9AB, &H5BE0CD19)
             Hlo = Array(&HF3BCC908, &H84CAA73B, &HFE94F82B, &H5F1D36F1, &HADE682D1, &H2B3E6C1F, &HFB41BD6B, &H137E2179)
-            computeRaw = longsToBytesBE(calculateSHA512Core(bytesToWordArraySHA512(mBuf, mLen), Hhi, Hlo))
+            rawHash = longsToBytesBE(calculateSHA512Core(bytesToWordArraySHA512(bytes, n), Hhi, Hlo))
         Case "sha512-256"
             Hhi = Array(&H22312194, &H9F555FA3, &H2393B86B, &H96387719, &H96283EE2, &HBE5E1E25, &H2B0199FC, &HEB72DDC)
             Hlo = Array(&HFC2BF72C, &HC84C64C2, &H6F53B151, &H5940EABD, &HA88EFFE3, &H53863992, &H2C85B8AA, &H81C52CA2)
-            computeRaw = truncateBytes(longsToBytesBE(calculateSHA512Core(bytesToWordArraySHA512(mBuf, mLen), Hhi, Hlo)), 32)
+            rawHash = truncateBytes(longsToBytesBE(calculateSHA512Core(bytesToWordArraySHA512(bytes, n), Hhi, Hlo)), 32)
         Case "sha512-224"
             Hhi = Array(&H8C3D37C8, &H73E19966, &H1DFAB7AE, &H679DD514, &HF6D2B69, &H77E36F73, &H3F9D85A8, &H1112E6AD)
             Hlo = Array(&H19544DA2, &H89DCD4D6, &H32FF9C82, &H582F9FCF, &H7BD44DA8, &H4C48942, &H6A1D36C8, &H91D692A1)
-            computeRaw = truncateBytes(longsToBytesBE(calculateSHA512Core(bytesToWordArraySHA512(mBuf, mLen), Hhi, Hlo)), 28)
+            rawHash = truncateBytes(longsToBytesBE(calculateSHA512Core(bytesToWordArraySHA512(bytes, n), Hhi, Hlo)), 28)
         Case Else
             Err.Raise vbObjectError + 1, "CRYPTO", "unknown hash algorithm: " & hashMode
     End Select
+End Function
+
+' Input block size (in bytes) of the current hash, needed for HMAC padding.
+Private Function blockSize() As Long
+    Select Case hashMode
+        Case "sha384", "sha512", "sha512-256", "sha512-224"
+            blockSize = 128
+        Case Else
+            blockSize = 64
+    End Select
+End Function
+
+' HMAC(K, msg) = H((K' XOR opad) || H((K' XOR ipad) || msg)), where K' is the key
+' hashed down if longer than the block, then zero-padded to the block size.
+Private Function computeHmac() As Byte()
+    Dim bs As Long: bs = blockSize()
+    Dim k() As Byte, kSrc() As Byte, kLen As Long, i As Long
+    ReDim k(bs - 1)
+    If byteLen(hmacKeyBytes) > bs Then
+        kSrc = rawHash(hmacKeyBytes, byteLen(hmacKeyBytes))
+    Else
+        kSrc = hmacKeyBytes
+    End If
+    kLen = byteLen(kSrc)
+    For i = 0 To bs - 1
+        If i < kLen Then k(i) = kSrc(i) Else k(i) = 0
+    Next i
+
+    ' inner = H((K' XOR 0x36) || msg)
+    Dim inner() As Byte
+    ReDim inner(bs + mLen - 1)
+    For i = 0 To bs - 1
+        inner(i) = k(i) Xor &H36
+    Next i
+    For i = 0 To mLen - 1
+        inner(bs + i) = mBuf(i)
+    Next i
+    Dim innerHash() As Byte, iLen As Long
+    innerHash = rawHash(inner, bs + mLen)
+    iLen = byteLen(innerHash)
+
+    ' outer = H((K' XOR 0x5C) || inner)
+    Dim outer() As Byte
+    ReDim outer(bs + iLen - 1)
+    For i = 0 To bs - 1
+        outer(i) = k(i) Xor &H5C
+    Next i
+    For i = 0 To iLen - 1
+        outer(bs + i) = innerHash(i)
+    Next i
+    computeHmac = rawHash(outer, bs + iLen)
+End Function
+
+' Finalizes the current message as either a plain hash or an HMAC.
+Private Function finalBytes() As Byte()
+    If isHmac Then
+        finalBytes = computeHmac()
+    Else
+        finalBytes = rawHash(mBuf, mLen)
+    End If
 End Function
 
 ' Appends data to the message. data may be a String (encoded as UTF-8) or a
@@ -1064,7 +1147,7 @@ End Function
 ' more than once; it does not consume the buffered message.
 Public Function digest(Optional ByVal mode As String = "hex") As String
     Dim raw() As Byte
-    raw = computeRaw()
+    raw = finalBytes()
     Select Case LCase(mode)
         Case "hex"
             digest = bytesToHex(raw)
@@ -1077,5 +1160,5 @@ End Function
 
 ' Returns the digest as a raw Byte array.
 Public Function digestBytes() As Byte()
-    digestBytes = computeRaw()
+    digestBytes = finalBytes()
 End Function
