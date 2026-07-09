@@ -47,8 +47,16 @@ Debug.Print o.digest("hex")
   Debug.Print o.digest("hex")
   ```
 
-- `digest(mode)` — finalize as a `"hex"` or `"base64"` string. It does not consume the buffer, so it can be called more than once.
+- `digest(mode)` — finalize as a `"hex"`, `"base64"` or `"base64url"` string. It does not consume the buffer, so it can be called more than once.
 - `digestBytes()` — finalize as a raw `Byte()` array.
+- `verify(expected, [mode])` — timing-safe comparison of the digest against `expected` (avoids leaking, via early-exit timing, how many leading characters matched — the correct way to check a MAC). `mode` is the encoding of `expected` (`"hex"` default, `"base64"`/`"base64url"` accepted); hex compares case-insensitively.
+
+  ```vb
+  Dim o As New CRYPTO
+  o.createHmac "sha256", key
+  o.update message
+  If o.verify(expectedMac) Then ' ... trusted
+  ```
 
 Unknown algorithm or output-mode names raise a run-time error rather than returning an empty string.
 
@@ -58,7 +66,7 @@ Unknown algorithm or output-mode names raise a run-time error rather than return
 
 1. Import both `CRYPTO.cls` and `CRYPTO.test.bas` into the VBA project.
 2. Open the Immediate window with `Ctrl+G`, type `testAll`, and press Enter.
-3. The last line prints e.g. `63 passed, 0 failed`; any failure prints the expected and actual digests above the summary.
+3. The last line prints e.g. `72 passed, 0 failed`; any failure prints the expected and actual digests above the summary.
 
 ### Limitations
 

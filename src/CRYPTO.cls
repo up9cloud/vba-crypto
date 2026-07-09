@@ -1143,7 +1143,7 @@ Private Function hexToBase64(hexString As String) As String
     hexToBase64 = bytesToBase64(hexToBytes(hexString))
 End Function
 
-' Returns the digest as a hex ("hex") or Base64 ("base64") string. May be called
+' Returns the digest as a "hex", "base64" or "base64url" string. May be called
 ' more than once; it does not consume the buffered message.
 Public Function digest(Optional ByVal mode As String = "hex") As String
     Dim raw() As Byte
@@ -1153,6 +1153,9 @@ Public Function digest(Optional ByVal mode As String = "hex") As String
             digest = bytesToHex(raw)
         Case "base64"
             digest = bytesToBase64(raw)
+        Case "base64url"
+            ' URL-safe alphabet, no padding (RFC 4648 §5), as used by JWT etc.
+            digest = Replace(Replace(Replace(bytesToBase64(raw), "+", "-"), "/", "_"), "=", "")
         Case Else
             Err.Raise 5, "CRYPTO.digest", "unknown output mode: " & mode
     End Select
@@ -1161,4 +1164,36 @@ End Function
 ' Returns the digest as a raw Byte array.
 Public Function digestBytes() As Byte()
     digestBytes = finalBytes()
+End Function
+
+' Compares the digest against an expected value in constant time, to avoid
+' leaking (via early-exit timing) how many leading characters matched -- the
+' standard way to verify a MAC. mode is the encoding of `expected` ("hex" by
+' default; "base64"/"base64url" also accepted). Hex compares case-insensitively.
+Public Function verify(ByVal expected As String, Optional ByVal mode As String = "hex") As Boolean
+    Dim actual As String
+    actual = digest(mode)
+    If LCase(mode) = "hex" Then
+        actual = LCase(actual)
+        expected = LCase(expected)
+    End If
+    verify = constantTimeEquals(actual, expected)
+End Function
+
+' Timing-safe string equality: always scans the full length and never exits
+' early, so the running time does not depend on where the first mismatch is.
+Private Function constantTimeEquals(ByVal a As String, ByVal b As String) As Boolean
+    Dim diff As Long, n As Long, i As Long, la As Long, lb As Long
+    la = Len(a)
+    lb = Len(b)
+    n = la
+    If lb > n Then n = lb
+    diff = la Xor lb
+    For i = 1 To n
+        Dim ca As Long, cb As Long
+        If i <= la Then ca = Asc(Mid(a, i, 1)) Else ca = 0
+        If i <= lb Then cb = Asc(Mid(b, i, 1)) Else cb = 0
+        diff = diff Or (ca Xor cb)
+    Next i
+    constantTimeEquals = (diff = 0)
 End Function

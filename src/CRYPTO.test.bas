@@ -87,10 +87,15 @@ Private Sub testAll()
     test "sha512", String(128, "a"), "hex", "b73d1929aa615934e61a871596b3f3b33359f42b8175602e89f7e06e5f658a243667807ed300314b95cacdd579f3e33abdfbe351909519a846d465c59582f321"
     test "sha512", String(200, "a"), "hex", "4b11459c33f52a22ee8236782714c150a3b2c60994e9acee17fe68947a3e6789f31e7668394592da7bef827cddca88c4e6f86e4df7ed1ae6cba71f3e98faee9f"
 
+    ' --- base64url output -----------------------------------------------------
+    test "sha256", "hello world", "base64url", "uU0nuZNNPgilLlLX2n2r-sSE7-N6U4DukIj3rOLvzek"
+    test "md5", "hello world", "base64url", "XrY7u-Ae7tCTyyK7j1rNww"
+
     testUtf8
     testBytesInput
     testStreaming
     testHmac
+    testVerify
     testErrors
 
     Debug.Print "-----------------------------------------"
@@ -176,6 +181,33 @@ Private Sub testHmac()
     c.update "The quick brown fox "
     c.update "jumps over the lazy dog"
     assertEqual "hmac streaming sha256", "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8", c.digest("hex")
+End Sub
+
+' verify() does a timing-safe comparison against an expected digest/MAC.
+Private Sub testVerify()
+    Dim c As CRYPTO
+
+    ' correct hash matches (and is case-insensitive for hex)
+    Set c = New CRYPTO
+    c.createHash "sha256"
+    c.update "hello world"
+    assertEqual "verify hex match", "True", CStr(c.verify("b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"))
+    assertEqual "verify hex UPPER match", "True", CStr(c.verify("B94D27B9934D3E08A52E52D7DA7DABFAC484EFE37A5380EE9088F7ACE2EFCDE9"))
+    assertEqual "verify wrong", "False", CStr(c.verify("0000000000000000000000000000000000000000000000000000000000000000"))
+    assertEqual "verify length mismatch", "False", CStr(c.verify("b94d27b9"))
+
+    ' base64 / base64url expected values
+    Set c = New CRYPTO
+    c.createHash "sha256"
+    c.update "hello world"
+    assertEqual "verify base64", "True", CStr(c.verify("uU0nuZNNPgilLlLX2n2r+sSE7+N6U4DukIj3rOLvzek=", "base64"))
+    assertEqual "verify base64url", "True", CStr(c.verify("uU0nuZNNPgilLlLX2n2r-sSE7-N6U4DukIj3rOLvzek", "base64url"))
+
+    ' HMAC verification
+    Set c = New CRYPTO
+    c.createHmac "sha256", "key"
+    c.update "The quick brown fox jumps over the lazy dog"
+    assertEqual "verify hmac", "True", CStr(c.verify("f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"))
 End Sub
 
 ' Unknown algorithm / output mode must raise instead of failing silently.
