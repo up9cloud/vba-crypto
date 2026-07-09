@@ -96,6 +96,7 @@ Private Sub testAll()
     testStreaming
     testHmac
     testVerify
+    testPbkdf2
     testErrors
 
     Debug.Print "-----------------------------------------"
@@ -208,6 +209,40 @@ Private Sub testVerify()
     c.createHmac "sha256", "key"
     c.update "The quick brown fox jumps over the lazy dog"
     assertEqual "verify hmac", "True", CStr(c.verify("f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"))
+End Sub
+
+' PBKDF2 known-answer vectors. RFC 6070 covers the SHA-1 cases; the rest are
+' cross-checked against Python hashlib.pbkdf2_hmac.
+Private Sub testPbkdf2()
+    Dim c As CRYPTO: Set c = New CRYPTO
+
+    ' RFC 6070 (PBKDF2-HMAC-SHA1)
+    assertEqual "pbkdf2 sha1 c=1", "0c60c80f961f0e71f3a9b524af6012062fe037a6", c.pbkdf2("password", "salt", 1, 20, "sha1")
+    assertEqual "pbkdf2 sha1 c=2", "ea6c014dc72d6f8ccd1ed92ace1d41f0d8de8957", c.pbkdf2("password", "salt", 2, 20, "sha1")
+    assertEqual "pbkdf2 sha1 c=4096", "4b007901b765489abead49d926f721d065a429c1", c.pbkdf2("password", "salt", 4096, 20, "sha1")
+
+    ' SHA-256, including a partial block (16) and a multi-block (40) key length
+    assertEqual "pbkdf2 sha256 c=1", "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b", c.pbkdf2("password", "salt", 1, 32, "sha256")
+    assertEqual "pbkdf2 sha256 c=1000", "632c2812e46d4604102ba7618e9d6d7d2f8128f6266b4a03264d2a0460b7dcb3", c.pbkdf2("password", "salt", 1000, 32, "sha256")
+    assertEqual "pbkdf2 sha256 dk16", "120fb6cffcf8b32c43e7225256c4f837", c.pbkdf2("password", "salt", 1, 16, "sha256")
+    assertEqual "pbkdf2 sha256 dk40", "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b4dbf3a2f3dad3377", c.pbkdf2("password", "salt", 1, 40, "sha256")
+
+    ' SHA-512 and default algorithm (sha256)
+    assertEqual "pbkdf2 sha512 c=1", "867f70cf1ade02cff3752599a3a53dc4af34c7a669815ae5d513554e1c8cf252c02d470a285a0501bad999bfe943c08f050235d7d68b1da55e63f73b60a57fce", c.pbkdf2("password", "salt", 1, 64, "sha512")
+    assertEqual "pbkdf2 default algo", "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b", c.pbkdf2("password", "salt", 1, 32)
+
+    ' base64 output
+    assertEqual "pbkdf2 base64", "Eg+2z/z4syxD5yJSVsT4N6hlSMkszDVICAWYfLcL4Xs=", c.pbkdf2("password", "salt", 1, 32, "sha256", "base64")
+
+    ' invalid parameters must raise
+    Dim raised As Boolean
+    raised = False
+    On Error Resume Next
+    Dim s As String
+    s = c.pbkdf2("password", "salt", 0, 32, "sha256")
+    raised = (Err.Number <> 0)
+    On Error GoTo 0
+    assertEqual "pbkdf2 rejects iterations<1", "True", CStr(raised)
 End Sub
 
 ' Unknown algorithm / output mode must raise instead of failing silently.

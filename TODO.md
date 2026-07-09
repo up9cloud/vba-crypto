@@ -1,10 +1,8 @@
 # TODO / Roadmap
 
-## Planned
+## Done
 
-- **PBKDF2** — password-based key derivation (`PBKDF2-HMAC-SHA256` etc.).
-  Builds directly on the existing HMAC, so it fits naturally. Likely API:
-  `derivePBKDF2(password, salt, iterations, keyLen)`.
+- **PBKDF2** — `pbkdf2()` / `pbkdf2Bytes()`, using HMAC-<name> as the PRF.
 
 ## Out of scope (by decision)
 

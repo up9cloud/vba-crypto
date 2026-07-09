@@ -364,14 +364,7 @@ End Sub
 ' with digest()/digestBytes(), exactly as for a plain hash.
 Public Sub createHmac(Optional ByVal name As String = "sha256", Optional key As Variant = "")
     createHash name
-    Select Case VarType(key)
-        Case vbString
-            hmacKeyBytes = utf8Bytes(CStr(key))
-        Case vbArray + vbByte
-            hmacKeyBytes = key
-        Case Else
-            Err.Raise 5, "CRYPTO.createHmac", "key must be a String or a Byte array"
-    End Select
+    hmacKeyBytes = toBytes(key)
     isHmac = True
 End Sub
 
@@ -1014,33 +1007,36 @@ Private Function blockSize() As Long
     End Select
 End Function
 
-' HMAC(K, msg) = H((K' XOR opad) || H((K' XOR ipad) || msg)), where K' is the key
-' hashed down if longer than the block, then zero-padded to the block size.
-Private Function computeHmac() As Byte()
+' HMAC(K, msg) = H((K' XOR opad) || H((K' XOR ipad) || msg)) for the current
+' hashMode, where K' is the key hashed down if longer than the block, then
+' zero-padded to the block size. Pure over its arguments (used by both the
+' instance HMAC flow and PBKDF2).
+Private Function hmacRaw(key() As Byte, ByVal keyLen As Long, msg() As Byte, ByVal msgLen As Long) As Byte()
     Dim bs As Long: bs = blockSize()
-    Dim k() As Byte, kSrc() As Byte, kLen As Long, i As Long
+    Dim k() As Byte, kSrc() As Byte, kSrcLen As Long, i As Long
     ReDim k(bs - 1)
-    If byteLen(hmacKeyBytes) > bs Then
-        kSrc = rawHash(hmacKeyBytes, byteLen(hmacKeyBytes))
+    If keyLen > bs Then
+        kSrc = rawHash(key, keyLen)
+        kSrcLen = byteLen(kSrc)
     Else
-        kSrc = hmacKeyBytes
+        kSrc = key
+        kSrcLen = keyLen
     End If
-    kLen = byteLen(kSrc)
     For i = 0 To bs - 1
-        If i < kLen Then k(i) = kSrc(i) Else k(i) = 0
+        If i < kSrcLen Then k(i) = kSrc(i) Else k(i) = 0
     Next i
 
     ' inner = H((K' XOR 0x36) || msg)
     Dim inner() As Byte
-    ReDim inner(bs + mLen - 1)
+    ReDim inner(bs + msgLen - 1)
     For i = 0 To bs - 1
         inner(i) = k(i) Xor &H36
     Next i
-    For i = 0 To mLen - 1
-        inner(bs + i) = mBuf(i)
+    For i = 0 To msgLen - 1
+        inner(bs + i) = msg(i)
     Next i
     Dim innerHash() As Byte, iLen As Long
-    innerHash = rawHash(inner, bs + mLen)
+    innerHash = rawHash(inner, bs + msgLen)
     iLen = byteLen(innerHash)
 
     ' outer = H((K' XOR 0x5C) || inner)
@@ -1052,7 +1048,97 @@ Private Function computeHmac() As Byte()
     For i = 0 To iLen - 1
         outer(bs + i) = innerHash(i)
     Next i
-    computeHmac = rawHash(outer, bs + iLen)
+    hmacRaw = rawHash(outer, bs + iLen)
+End Function
+
+Private Function computeHmac() As Byte()
+    computeHmac = hmacRaw(hmacKeyBytes, byteLen(hmacKeyBytes), mBuf, mLen)
+End Function
+
+' Output length in bytes of the current hash algorithm.
+Private Function digestLen() As Long
+    Select Case hashMode
+        Case "md5": digestLen = 16
+        Case "sha1": digestLen = 20
+        Case "sha224", "sha512-224": digestLen = 28
+        Case "sha256", "sha512-256": digestLen = 32
+        Case "sha384": digestLen = 48
+        Case "sha512": digestLen = 64
+        Case Else
+            Err.Raise vbObjectError + 1, "CRYPTO", "unknown hash algorithm: " & hashMode
+    End Select
+End Function
+
+' Coerces a String (UTF-8) or Byte-array argument to a Byte array.
+Private Function toBytes(v) As Byte()
+    Select Case VarType(v)
+        Case vbString
+            toBytes = utf8Bytes(CStr(v))
+        Case vbArray + vbByte
+            toBytes = v
+        Case Else
+            Err.Raise 5, "CRYPTO", "expected a String or a Byte array"
+    End Select
+End Function
+
+' PBKDF2 (RFC 2898) using HMAC-<name> as the PRF. Derives keyLen bytes from
+' password and salt with `iterations` rounds. password/salt may be String
+' (UTF-8) or Byte arrays. NOTE: this configures the object's algorithm, so it
+' resets any in-progress update() state.
+Public Function pbkdf2Bytes(password, salt, ByVal iterations As Long, ByVal keyLen As Long, Optional ByVal name As String = "sha256") As Byte()
+    If iterations < 1 Then Err.Raise 5, "CRYPTO.pbkdf2", "iterations must be >= 1"
+    If keyLen < 1 Then Err.Raise 5, "CRYPTO.pbkdf2", "keyLen must be >= 1"
+    createHash name
+
+    Dim pw() As Byte, sl() As Byte, pwLen As Long, slLen As Long
+    pw = toBytes(password): pwLen = byteLen(pw)
+    sl = toBytes(salt): slLen = byteLen(sl)
+
+    Dim hLen As Long: hLen = digestLen()
+    Dim dk() As Byte: ReDim dk(keyLen - 1)
+    Dim dkPos As Long: dkPos = 0
+
+    ' msg = salt || INT_32_BE(blockIndex)
+    Dim msg() As Byte: ReDim msg(slLen + 4 - 1)
+    Dim i As Long, j As Long, c As Long, blockIndex As Long
+    For i = 0 To slLen - 1
+        msg(i) = sl(i)
+    Next i
+
+    Dim u() As Byte, t() As Byte
+    blockIndex = 1
+    Do While dkPos < keyLen
+        msg(slLen) = CByte(RShift(blockIndex, 24) And &HFF&)
+        msg(slLen + 1) = CByte(RShift(blockIndex, 16) And &HFF&)
+        msg(slLen + 2) = CByte(RShift(blockIndex, 8) And &HFF&)
+        msg(slLen + 3) = CByte(blockIndex And &HFF&)
+
+        u = hmacRaw(pw, pwLen, msg, slLen + 4)   ' U_1
+        t = u                                    ' T = U_1
+        For c = 2 To iterations
+            u = hmacRaw(pw, pwLen, u, hLen)       ' U_c = PRF(pw, U_{c-1})
+            For j = 0 To hLen - 1
+                t(j) = t(j) Xor u(j)
+            Next j
+        Next c
+
+        For j = 0 To hLen - 1
+            If dkPos < keyLen Then
+                dk(dkPos) = t(j)
+                dkPos = dkPos + 1
+            End If
+        Next j
+        blockIndex = blockIndex + 1
+    Loop
+
+    pbkdf2Bytes = dk
+End Function
+
+' PBKDF2 with the derived key returned as a "hex", "base64" or "base64url" string.
+Public Function pbkdf2(password, salt, ByVal iterations As Long, ByVal keyLen As Long, Optional ByVal name As String = "sha256", Optional ByVal outMode As String = "hex") As String
+    Dim dk() As Byte
+    dk = pbkdf2Bytes(password, salt, iterations, keyLen, name)
+    pbkdf2 = encodeBytes(dk, outMode)
 End Function
 
 ' Finalizes the current message as either a plain hash or an HMAC.
@@ -1068,14 +1154,7 @@ End Function
 ' Byte array. Call repeatedly to hash data in pieces, then finalize with digest.
 Public Sub update(data)
     Dim b() As Byte
-    Select Case VarType(data)
-        Case vbString
-            b = utf8Bytes(CStr(data))
-        Case vbArray + vbByte
-            b = data
-        Case Else
-            Err.Raise 5, "CRYPTO.update", "update expects a String or a Byte array"
-    End Select
+    b = toBytes(data)
     appendBytes b
 End Sub
 
@@ -1143,22 +1222,27 @@ Private Function hexToBase64(hexString As String) As String
     hexToBase64 = bytesToBase64(hexToBytes(hexString))
 End Function
 
+' Encodes bytes as a "hex", "base64" or "base64url" string.
+Private Function encodeBytes(raw() As Byte, ByVal mode As String) As String
+    Select Case LCase(mode)
+        Case "hex"
+            encodeBytes = bytesToHex(raw)
+        Case "base64"
+            encodeBytes = bytesToBase64(raw)
+        Case "base64url"
+            ' URL-safe alphabet, no padding (RFC 4648 §5), as used by JWT etc.
+            encodeBytes = Replace(Replace(Replace(bytesToBase64(raw), "+", "-"), "/", "_"), "=", "")
+        Case Else
+            Err.Raise 5, "CRYPTO", "unknown output mode: " & mode
+    End Select
+End Function
+
 ' Returns the digest as a "hex", "base64" or "base64url" string. May be called
 ' more than once; it does not consume the buffered message.
 Public Function digest(Optional ByVal mode As String = "hex") As String
     Dim raw() As Byte
     raw = finalBytes()
-    Select Case LCase(mode)
-        Case "hex"
-            digest = bytesToHex(raw)
-        Case "base64"
-            digest = bytesToBase64(raw)
-        Case "base64url"
-            ' URL-safe alphabet, no padding (RFC 4648 §5), as used by JWT etc.
-            digest = Replace(Replace(Replace(bytesToBase64(raw), "+", "-"), "/", "_"), "=", "")
-        Case Else
-            Err.Raise 5, "CRYPTO.digest", "unknown output mode: " & mode
-    End Select
+    digest = encodeBytes(raw, mode)
 End Function
 
 ' Returns the digest as a raw Byte array.

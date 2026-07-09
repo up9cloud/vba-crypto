@@ -33,10 +33,22 @@ Debug.Print o.digest("hex")
 ' 1423df78108155d1bef5dac2bb5d8eae873eb35b417c0184d6a33416b669136e
 ```
 
+### PBKDF2
+
+`pbkdf2(password, salt, iterations, keyLen, [name], [outMode])` derives a key from a password (RFC 2898, using HMAC-`name` as the PRF). `password`/`salt` may be `String` (UTF-8) or `Byte` arrays.
+
+```vb
+Dim o As New CRYPTO
+Debug.Print o.pbkdf2("password", "salt", 100000, 32, "sha256")   ' 64 hex chars
+```
+
+`pbkdf2Bytes(...)` returns the derived key as a raw `Byte()`. (Both configure the object's algorithm, so they reset any in-progress `update()`.)
+
 ### API
 
 - `createHash(name)` — pick the algorithm (see the list above). Also resets the object so it can be reused.
 - `createHmac(name, key)` — start an HMAC with the given algorithm and key (String or Byte array).
+- `pbkdf2(password, salt, iterations, keyLen, [name], [outMode])` / `pbkdf2Bytes(...)` — PBKDF2 key derivation, as a string or raw `Byte()`.
 - `update(data)` — feed data. `data` may be a `String` (encoded as **UTF-8**, so non-ASCII matches openssl/Node) or a `Byte` array. Call it multiple times to hash data in pieces:
 
   ```vb
@@ -66,7 +78,7 @@ Unknown algorithm or output-mode names raise a run-time error rather than return
 
 1. Import both `CRYPTO.cls` and `CRYPTO.test.bas` into the VBA project.
 2. Open the Immediate window with `Ctrl+G`, type `testAll`, and press Enter.
-3. The last line prints e.g. `72 passed, 0 failed`; any failure prints the expected and actual digests above the summary.
+3. The last line prints e.g. `83 passed, 0 failed`; any failure prints the expected and actual digests above the summary.
 
 ### Limitations
 
